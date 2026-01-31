@@ -1,30 +1,56 @@
+require('dotenv').config(); // Pour lire les variables d'environnement
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
+const mongoose = require('mongoose'); // Import de Mongoose
 
 const app = express();
 app.use(cors());
 
 const server = http.createServer(app);
 
-// --- CORRECTION ULTIME : On ouvre les vannes ---
+// --- CONFIGURATION CORS ---
 const io = new Server(server, { 
-    cors: { 
-        origin: "*",             // L'étoile magique : accepte toutes les connexions
-        methods: ["GET", "POST"] 
-    } 
+    cors: { origin: "*", methods: ["GET", "POST"] } 
 });
 
+// --- CONNEXION BASE DE DONNÉES (MONGODB) ---
+// Utilise la variable d'environnement MONGO_URI
+const MONGO_URI = process.env.MONGO_URI;
+
+mongoose.connect(MONGO_URI)
+    .then(() => console.log("✅ CONNECTÉ À MONGODB (SCORES SAUVEGARDÉS !)"))
+    .catch(err => console.error("❌ ERREUR MONGODB:", err));
+
+// --- SCHÉMAS DE DONNÉES ---
+const scoreSchema = new mongoose.Schema({
+    name: String,
+    score: Number,
+    grade: String,
+    date: { type: Date, default: Date.now }
+});
+
+const SoloScore = mongoose.model('SoloScore', scoreSchema);
+const AgencyScore = mongoose.model('AgencyScore', scoreSchema);
+
+// --- FONCTION POUR RÉCUPÉRER LEADERBOARD ---
+async function getLeaderboards() {
+    try {
+        // On récupère les 50 meilleurs scores, triés par score décroissant (-1)
+        const solo = await SoloScore.find().sort({ score: -1 }).limit(50);
+        const agency = await AgencyScore.find().sort({ score: -1 }).limit(50);
+        return { solo, agency };
+    } catch (e) {
+        console.error("Erreur lecture scores:", e);
+        return { solo: [], agency: [] };
+    }
+}
+
+// --- CONSTANTES DU JEU ---
 const WORDS = ["PASSION", "NATURE", "CONFIANCE", "LUXE", "TECH", "ROYAL"];
 const COLORS = ["rouge", "vert", "bleu", "jaune"];
 const SHAPES = ["carré", "rond", "triangle"];
-
-// Leaderboard temporaire (reset au redémarrage serveur)
-let leaderboards = {
-    solo: [{ name: "Super MMI", score: 5000, grade: "S" }],
-    agency: [{ name: "Alpha Corp", score: 4500, grade: "S" }]
-};
 
 function generateCode() { return Math.floor(1000 + Math.random() * 9000).toString(); }
 function generateRoomId() { return Math.random().toString(36).substring(2, 7).toUpperCase(); }
@@ -71,23 +97,35 @@ function checkVictory(roomId) {
     if (state.team.dev.progress >= 100 && state.team.crea.progress >= 100) finishGame(roomId);
 }
 
-function finishGame(roomId) {
+// --- FIN DU JEU (MODIFIÉE POUR SAUVEGARDER EN BDD) ---
+async function finishGame(roomId) {
     const state = rooms[roomId].state;
     state.finished = true;
+    
+    // Calcul score
     let rawScore = (state.timeLeft * 10) + (state.budget * 50);
     let grade = rawScore > 4000 ? "S" : rawScore > 3000 ? "A" : rawScore > 2000 ? "B" : "C";
-    
-    const targetBoard = state.mode === 'solo' ? leaderboards.solo : leaderboards.agency;
-    targetBoard.push({ name: state.agencyName, score: rawScore, grade, isCurrent: true });
-    targetBoard.sort((a, b) => b.score - a.score);
-    if (state.mode === 'solo') leaderboards.solo = targetBoard.slice(0, 5); else leaderboards.agency = targetBoard.slice(0, 5);
-
     state.score = { points: rawScore, grade };
+
+    // 💾 SAUVEGARDE EN BASE DE DONNÉES
+    try {
+        if (state.mode === 'solo') {
+            await new SoloScore({ name: state.agencyName, score: rawScore, grade }).save();
+        } else {
+            await new AgencyScore({ name: state.agencyName, score: rawScore, grade }).save();
+        }
+    } catch (e) {
+        console.error("Erreur sauvegarde score:", e);
+    }
+
+    // Récupérer le nouveau classement à jour
+    const leaderboards = await getLeaderboards();
+
     io.to(roomId).emit('game_update', { ...state, leaderboards });
     clearInterval(rooms[roomId].interval);
 }
 
-function startGameLoop(roomId) {
+async function startGameLoop(roomId) {
     if (rooms[roomId].interval) clearInterval(rooms[roomId].interval);
     
     const state = rooms[roomId].state;
@@ -95,13 +133,15 @@ function startGameLoop(roomId) {
     state.adminCode = generateCode();
     rotateBrief(state);
     
+    // On envoie le classement actuel au début aussi
+    const leaderboards = await getLeaderboards();
     io.to(roomId).emit('game_start', { ...state, leaderboards });
 
-    rooms[roomId].interval = setInterval(() => {
+    rooms[roomId].interval = setInterval(async () => {
         if (state.status === 'finished') return;
 
         state.timeLeft -= 1;
-        if (state.timeLeft <= 0) { state.budget = 0; finishGame(roomId); }
+        if (state.timeLeft <= 0) { state.budget = 0; await finishGame(roomId); return; }
 
         let heatIncrease = 0.5 + Math.random(); 
         if (Math.random() > 0.95) heatIncrease += 5;
@@ -118,21 +158,28 @@ function startGameLoop(roomId) {
             state.activeCrisis = Math.random() > 0.5 ? 'FIREWALL' : 'COPYRIGHT';
             state.crisisCode = generateCode();
         }
-        io.to(roomId).emit('game_update', { ...state, leaderboards });
+        
+        // On n'envoie pas le leaderboard à chaque seconde pour économiser la bande passante,
+        // sauf si nécessaire. Ici on envoie juste null pour leaderboards dans la boucle, 
+        // le front gardera l'ancien.
+        io.to(roomId).emit('game_update', { ...state }); 
     }, 1000);
 }
 
 io.on('connection', (socket) => {
     
-    socket.on('create_room', ({ mode, agencyName, playerName }) => {
+    // CREATE
+    socket.on('create_room', async ({ mode, agencyName, playerName }) => {
         const roomId = generateRoomId();
         rooms[roomId] = { state: createGameState(mode, agencyName), interval: null };
-        
         socket.join(roomId);
         socketToRoom[socket.id] = roomId;
 
         const state = rooms[roomId].state;
         state.players.push({ id: socket.id, name: playerName, role: null });
+
+        // Récupérer Leaderboard depuis la DB
+        const leaderboards = await getLeaderboards();
 
         if (mode === 'solo') {
             ['dev', 'crea', 'strat'].forEach(r => { state.team[r].isHuman = true; state.team[r].name = playerName; });
@@ -140,25 +187,27 @@ io.on('connection', (socket) => {
             startGameLoop(roomId);
         } else {
             socket.emit('room_joined', { roomId, role: null });
-            io.to(roomId).emit('lobby_update', state);
+            io.to(roomId).emit('lobby_update', { ...state, leaderboards });
         }
     });
 
-    socket.on('join_room_request', ({ roomId, playerName }) => {
+    // JOIN
+    socket.on('join_room_request', async ({ roomId, playerName }) => {
         const room = rooms[roomId];
         if (!room) { socket.emit('error', 'Code Room Invalide'); return; }
-        if (room.state.status !== 'waiting') { socket.emit('error', 'La partie a déjà commencé'); return; }
+        if (room.state.status !== 'waiting') { socket.emit('error', 'Partie déjà commencée'); return; }
 
         socket.join(roomId);
         socketToRoom[socket.id] = roomId;
-
         room.state.players.push({ id: socket.id, name: playerName, role: null });
         
+        const leaderboards = await getLeaderboards();
         socket.emit('room_joined', { roomId, role: null }); 
-        io.to(roomId).emit('lobby_update', room.state);
+        io.to(roomId).emit('lobby_update', { ...room.state, leaderboards });
     });
 
-    socket.on('pick_role', ({ roomId, role }) => {
+    // PICK ROLE
+    socket.on('pick_role', async ({ roomId, role }) => {
         const room = rooms[roomId];
         if (!room) return;
         const player = room.state.players.find(p => p.id === socket.id);
@@ -177,10 +226,12 @@ io.on('connection', (socket) => {
         room.state.team[role].isReady = false; 
 
         socket.emit('role_confirmed', role);
-        io.to(roomId).emit('lobby_update', room.state);
+        const leaderboards = await getLeaderboards();
+        io.to(roomId).emit('lobby_update', { ...room.state, leaderboards });
     });
 
-    socket.on('toggle_ready', ({ roomId, role }) => {
+    // READY
+    socket.on('toggle_ready', async ({ roomId, role }) => {
         const room = rooms[roomId];
         if (!room) return;
         
@@ -190,7 +241,8 @@ io.on('connection', (socket) => {
         const allRolesTaken = t.dev.isHuman && t.crea.isHuman && t.strat.isHuman;
         const allRolesReady = t.dev.isReady && t.crea.isReady && t.strat.isReady;
 
-        io.to(roomId).emit('lobby_update', room.state);
+        const leaderboards = await getLeaderboards();
+        io.to(roomId).emit('lobby_update', { ...room.state, leaderboards });
 
         if (allRolesTaken && allRolesReady) {
             startGameLoop(roomId);
@@ -202,7 +254,6 @@ io.on('connection', (socket) => {
         if (roomId && rooms[roomId]) {
             const room = rooms[roomId];
             const player = room.state.players.find(p => p.id === socket.id);
-            
             if (player) {
                 if (room.interval) clearInterval(room.interval);
                 io.to(roomId).emit('game_aborted', { reason: `Le joueur ${player.name} s'est déconnecté.` });
@@ -212,6 +263,7 @@ io.on('connection', (socket) => {
         delete socketToRoom[socket.id];
     });
 
+    // ACTIONS JEU
     const getRoom = () => rooms[socketToRoom[socket.id]];
 
     socket.on('action_process_spam', (isCorrect) => { const r = getRoom(); if(r) { if(isCorrect) r.state.budget+=2; else r.state.budget-=5; } });
@@ -252,6 +304,5 @@ io.on('connection', (socket) => {
     socket.on('action_buy_boost', () => { const r = getRoom(); if(r && r.state.budget>=30) { r.state.budget-=30; r.state.team.dev.progress+=10; r.state.team.crea.progress+=10; } });
 });
 
-// IMPORTANT : Render utilise un port dynamique, il faut utiliser process.env.PORT
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => console.log(`✅ SERVER READY ON PORT ${PORT}`));
