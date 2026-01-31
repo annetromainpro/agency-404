@@ -8,13 +8,10 @@ app.use(cors());
 
 const server = http.createServer(app);
 
-// --- CORRECTION CORS : On autorise localhost ET Vercel ---
+// --- CORRECTION ULTIME : On ouvre les vannes ---
 const io = new Server(server, { 
     cors: { 
-        origin: [
-            "http://localhost:5173",              // Pour tes tests sur ton PC
-            "https://agency-404.vercel.app"       // Pour la version en ligne (Vercel)
-        ], 
+        origin: "*",             // L'étoile magique : accepte toutes les connexions
         methods: ["GET", "POST"] 
     } 
 });
