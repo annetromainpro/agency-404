@@ -7,12 +7,23 @@ const app = express();
 app.use(cors());
 
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: "http://localhost:5173", methods: ["GET", "POST"] } });
+
+// --- CORRECTION CORS : On autorise localhost ET Vercel ---
+const io = new Server(server, { 
+    cors: { 
+        origin: [
+            "http://localhost:5173",              // Pour tes tests sur ton PC
+            "https://agency-404.vercel.app"       // Pour la version en ligne (Vercel)
+        ], 
+        methods: ["GET", "POST"] 
+    } 
+});
 
 const WORDS = ["PASSION", "NATURE", "CONFIANCE", "LUXE", "TECH", "ROYAL"];
 const COLORS = ["rouge", "vert", "bleu", "jaune"];
 const SHAPES = ["carré", "rond", "triangle"];
 
+// Leaderboard temporaire (reset au redémarrage serveur)
 let leaderboards = {
     solo: [{ name: "Super MMI", score: 5000, grade: "S" }],
     agency: [{ name: "Alpha Corp", score: 4500, grade: "S" }]
@@ -32,7 +43,6 @@ function generateBrandBook() {
     return book;
 }
 
-// Map pour retrouver la room via le socket ID rapidement en cas de déco
 const socketToRoom = {};
 const rooms = {};
 
@@ -117,13 +127,12 @@ function startGameLoop(roomId) {
 
 io.on('connection', (socket) => {
     
-    // --- LOBBY : CREATE ---
     socket.on('create_room', ({ mode, agencyName, playerName }) => {
         const roomId = generateRoomId();
         rooms[roomId] = { state: createGameState(mode, agencyName), interval: null };
         
         socket.join(roomId);
-        socketToRoom[socket.id] = roomId; // Tracking pour déco
+        socketToRoom[socket.id] = roomId;
 
         const state = rooms[roomId].state;
         state.players.push({ id: socket.id, name: playerName, role: null });
@@ -133,20 +142,18 @@ io.on('connection', (socket) => {
             socket.emit('room_joined', { roomId, role: 'solo_master' });
             startGameLoop(roomId);
         } else {
-            // MULTI : Créateur rejoint SANS RÔLE, liberté totale
             socket.emit('room_joined', { roomId, role: null });
             io.to(roomId).emit('lobby_update', state);
         }
     });
 
-    // --- LOBBY : JOIN ---
     socket.on('join_room_request', ({ roomId, playerName }) => {
         const room = rooms[roomId];
         if (!room) { socket.emit('error', 'Code Room Invalide'); return; }
         if (room.state.status !== 'waiting') { socket.emit('error', 'La partie a déjà commencé'); return; }
 
         socket.join(roomId);
-        socketToRoom[socket.id] = roomId; // Tracking pour déco
+        socketToRoom[socket.id] = roomId;
 
         room.state.players.push({ id: socket.id, name: playerName, role: null });
         
@@ -154,7 +161,6 @@ io.on('connection', (socket) => {
         io.to(roomId).emit('lobby_update', room.state);
     });
 
-    // --- LOBBY : PICK ROLE ---
     socket.on('pick_role', ({ roomId, role }) => {
         const room = rooms[roomId];
         if (!room) return;
@@ -177,7 +183,6 @@ io.on('connection', (socket) => {
         io.to(roomId).emit('lobby_update', room.state);
     });
 
-    // --- TOGGLE READY ---
     socket.on('toggle_ready', ({ roomId, role }) => {
         const room = rooms[roomId];
         if (!room) return;
@@ -195,7 +200,6 @@ io.on('connection', (socket) => {
         }
     });
 
-    // --- GESTION DECONNEXION ---
     socket.on('disconnect', () => {
         const roomId = socketToRoom[socket.id];
         if (roomId && rooms[roomId]) {
@@ -203,13 +207,8 @@ io.on('connection', (socket) => {
             const player = room.state.players.find(p => p.id === socket.id);
             
             if (player) {
-                // Arrêt de la partie
                 if (room.interval) clearInterval(room.interval);
-                
-                // On prévient les autres
                 io.to(roomId).emit('game_aborted', { reason: `Le joueur ${player.name} s'est déconnecté.` });
-                
-                // Nettoyage (Optionnel : on pourrait attendre une reconnexion, mais ici on kill)
                 delete rooms[roomId];
             }
         }
@@ -256,5 +255,6 @@ io.on('connection', (socket) => {
     socket.on('action_buy_boost', () => { const r = getRoom(); if(r && r.state.budget>=30) { r.state.budget-=30; r.state.team.dev.progress+=10; r.state.team.crea.progress+=10; } });
 });
 
+// IMPORTANT : Render utilise un port dynamique, il faut utiliser process.env.PORT
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => console.log(`✅ SERVER READY ON PORT ${PORT}`));
