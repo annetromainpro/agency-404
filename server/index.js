@@ -1,9 +1,9 @@
-require('dotenv').config(); // Pour lire les variables d'environnement
+require('dotenv').config();
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
-const mongoose = require('mongoose'); // Import de Mongoose
+const mongoose = require('mongoose');
 
 const app = express();
 app.use(cors());
@@ -15,15 +15,12 @@ const io = new Server(server, {
     cors: { origin: "*", methods: ["GET", "POST"] } 
 });
 
-// --- CONNEXION BASE DE DONNÉES (MONGODB) ---
-// Utilise la variable d'environnement MONGO_URI
+// --- MONGODB ---
 const MONGO_URI = process.env.MONGO_URI;
-
 mongoose.connect(MONGO_URI)
-    .then(() => console.log("✅ CONNECTÉ À MONGODB (SCORES SAUVEGARDÉS !)"))
+    .then(() => console.log("✅ CONNECTÉ À MONGODB"))
     .catch(err => console.error("❌ ERREUR MONGODB:", err));
 
-// --- SCHÉMAS DE DONNÉES ---
 const scoreSchema = new mongoose.Schema({
     name: String,
     score: Number,
@@ -34,10 +31,9 @@ const scoreSchema = new mongoose.Schema({
 const SoloScore = mongoose.model('SoloScore', scoreSchema);
 const AgencyScore = mongoose.model('AgencyScore', scoreSchema);
 
-// --- FONCTION POUR RÉCUPÉRER LEADERBOARD ---
+// Récupère le Top 50
 async function getLeaderboards() {
     try {
-        // On récupère les 50 meilleurs scores, triés par score décroissant (-1)
         const solo = await SoloScore.find().sort({ score: -1 }).limit(50);
         const agency = await AgencyScore.find().sort({ score: -1 }).limit(50);
         return { solo, agency };
@@ -47,7 +43,7 @@ async function getLeaderboards() {
     }
 }
 
-// --- CONSTANTES DU JEU ---
+// --- GAME LOGIC ---
 const WORDS = ["PASSION", "NATURE", "CONFIANCE", "LUXE", "TECH", "ROYAL"];
 const COLORS = ["rouge", "vert", "bleu", "jaune"];
 const SHAPES = ["carré", "rond", "triangle"];
@@ -97,29 +93,40 @@ function checkVictory(roomId) {
     if (state.team.dev.progress >= 100 && state.team.crea.progress >= 100) finishGame(roomId);
 }
 
-// --- FIN DU JEU (MODIFIÉE POUR SAUVEGARDER EN BDD) ---
+// --- FIN DU JEU & SAUVEGARDE ---
 async function finishGame(roomId) {
     const state = rooms[roomId].state;
     state.finished = true;
     
-    // Calcul score
     let rawScore = (state.timeLeft * 10) + (state.budget * 50);
     let grade = rawScore > 4000 ? "S" : rawScore > 3000 ? "A" : rawScore > 2000 ? "B" : "C";
     state.score = { points: rawScore, grade };
 
-    // 💾 SAUVEGARDE EN BASE DE DONNÉES
-    try {
-        if (state.mode === 'solo') {
-            await new SoloScore({ name: state.agencyName, score: rawScore, grade }).save();
-        } else {
-            await new AgencyScore({ name: state.agencyName, score: rawScore, grade }).save();
-        }
-    } catch (e) {
-        console.error("Erreur sauvegarde score:", e);
+    // --- CORRECTION PSEUDO ---
+    // En solo, on force le nom du joueur (le premier dans la liste)
+    let nameToSave = state.agencyName;
+    if (state.mode === 'solo' && state.players.length > 0) {
+        nameToSave = state.players[0].name; 
     }
 
-    // Récupérer le nouveau classement à jour
+    console.log(`💾 TENTATIVE SAUVEGARDE : ${nameToSave} - ${rawScore} pts`);
+
+    try {
+        if (state.mode === 'solo') {
+            await new SoloScore({ name: nameToSave, score: rawScore, grade }).save();
+        } else {
+            await new AgencyScore({ name: nameToSave, score: rawScore, grade }).save();
+        }
+        console.log("✅ SCORE SAUVEGARDÉ EN BDD !");
+    } catch (e) {
+        console.error("❌ ERREUR SAUVEGARDE:", e);
+    }
+
+    // On renvoie le leaderboard mis à jour
     const leaderboards = await getLeaderboards();
+    
+    // On ajoute le nom utilisé pour que le Front puisse surligner le bon score
+    state.savedName = nameToSave; 
 
     io.to(roomId).emit('game_update', { ...state, leaderboards });
     clearInterval(rooms[roomId].interval);
@@ -133,7 +140,6 @@ async function startGameLoop(roomId) {
     state.adminCode = generateCode();
     rotateBrief(state);
     
-    // On envoie le classement actuel au début aussi
     const leaderboards = await getLeaderboards();
     io.to(roomId).emit('game_start', { ...state, leaderboards });
 
@@ -159,16 +165,12 @@ async function startGameLoop(roomId) {
             state.crisisCode = generateCode();
         }
         
-        // On n'envoie pas le leaderboard à chaque seconde pour économiser la bande passante,
-        // sauf si nécessaire. Ici on envoie juste null pour leaderboards dans la boucle, 
-        // le front gardera l'ancien.
         io.to(roomId).emit('game_update', { ...state }); 
     }, 1000);
 }
 
 io.on('connection', (socket) => {
     
-    // CREATE
     socket.on('create_room', async ({ mode, agencyName, playerName }) => {
         const roomId = generateRoomId();
         rooms[roomId] = { state: createGameState(mode, agencyName), interval: null };
@@ -178,7 +180,6 @@ io.on('connection', (socket) => {
         const state = rooms[roomId].state;
         state.players.push({ id: socket.id, name: playerName, role: null });
 
-        // Récupérer Leaderboard depuis la DB
         const leaderboards = await getLeaderboards();
 
         if (mode === 'solo') {
@@ -191,7 +192,6 @@ io.on('connection', (socket) => {
         }
     });
 
-    // JOIN
     socket.on('join_room_request', async ({ roomId, playerName }) => {
         const room = rooms[roomId];
         if (!room) { socket.emit('error', 'Code Room Invalide'); return; }
@@ -206,7 +206,6 @@ io.on('connection', (socket) => {
         io.to(roomId).emit('lobby_update', { ...room.state, leaderboards });
     });
 
-    // PICK ROLE
     socket.on('pick_role', async ({ roomId, role }) => {
         const room = rooms[roomId];
         if (!room) return;
@@ -230,11 +229,9 @@ io.on('connection', (socket) => {
         io.to(roomId).emit('lobby_update', { ...room.state, leaderboards });
     });
 
-    // READY
     socket.on('toggle_ready', async ({ roomId, role }) => {
         const room = rooms[roomId];
         if (!room) return;
-        
         room.state.team[role].isReady = !room.state.team[role].isReady;
         
         const t = room.state.team;
@@ -244,9 +241,7 @@ io.on('connection', (socket) => {
         const leaderboards = await getLeaderboards();
         io.to(roomId).emit('lobby_update', { ...room.state, leaderboards });
 
-        if (allRolesTaken && allRolesReady) {
-            startGameLoop(roomId);
-        }
+        if (allRolesTaken && allRolesReady) { startGameLoop(roomId); }
     });
 
     socket.on('disconnect', () => {
@@ -263,7 +258,6 @@ io.on('connection', (socket) => {
         delete socketToRoom[socket.id];
     });
 
-    // ACTIONS JEU
     const getRoom = () => rooms[socketToRoom[socket.id]];
 
     socket.on('action_process_spam', (isCorrect) => { const r = getRoom(); if(r) { if(isCorrect) r.state.budget+=2; else r.state.budget-=5; } });
