@@ -102,7 +102,6 @@ async function finishGame(roomId) {
     let grade = rawScore > 4000 ? "S" : rawScore > 3000 ? "A" : rawScore > 2000 ? "B" : "C";
     state.score = { points: rawScore, grade };
 
-    // --- CORRECTION PSEUDO ---
     // En solo, on force le nom du joueur (le premier dans la liste)
     let nameToSave = state.agencyName;
     if (state.mode === 'solo' && state.players.length > 0) {
@@ -124,10 +123,7 @@ async function finishGame(roomId) {
 
     // On renvoie le leaderboard mis à jour
     const leaderboards = await getLeaderboards();
-    
-    // On ajoute le nom utilisé pour que le Front puisse surligner le bon score
     state.savedName = nameToSave; 
-
     io.to(roomId).emit('game_update', { ...state, leaderboards });
     clearInterval(rooms[roomId].interval);
 }
@@ -169,8 +165,15 @@ async function startGameLoop(roomId) {
     }, 1000);
 }
 
-io.on('connection', (socket) => {
+io.on('connection', async (socket) => {
     
+    // --- CORRECTION MAJEURE ICI : ENVOI IMMÉDIAT DU LEADERBOARD ---
+    // Dès qu'un joueur arrive sur le site, on lui donne les scores
+    const initialLeaderboards = await getLeaderboards();
+    socket.emit('init_data', { leaderboards: initialLeaderboards });
+
+    // ... (Le reste des écouteurs reste identique) ...
+
     socket.on('create_room', async ({ mode, agencyName, playerName }) => {
         const roomId = generateRoomId();
         rooms[roomId] = { state: createGameState(mode, agencyName), interval: null };

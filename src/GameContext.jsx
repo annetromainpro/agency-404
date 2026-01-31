@@ -2,21 +2,22 @@ import React, { createContext, useContext, useState, useEffect } from 'react';
 import io from 'socket.io-client';
 
 const GameContext = createContext();
-// Si on est en prod, on utilise l'URL du serveur, sinon localhost
+
+// CONFIGURATION URL
 const SERVER_URL = import.meta.env.VITE_SERVER_URL || 'http://localhost:3001';
 const socket = io(SERVER_URL);
 
 export const useGame = () => useContext(GameContext);
 
 export const GameProvider = ({ children }) => {
-  // ... (tous les autres states)
   const [myRole, setMyRole] = useState(null);
   const [gameMode, setGameMode] = useState(null);
   const [roomId, setRoomId] = useState(null);
   const [agencyName, setAgencyName] = useState("");
   const [isGameRunning, setIsGameRunning] = useState(false);
+  const [disconnectError, setDisconnectError] = useState(null);
+  
   const [lobbyData, setLobbyData] = useState(null);
-  const [disconnectError, setDisconnectError] = useState(null); // NOUVEAU
 
   // Game States
   const [budget, setBudget] = useState(0);
@@ -41,18 +42,44 @@ export const GameProvider = ({ children }) => {
   });
 
   useEffect(() => {
-    // ... (listeners existants)
-    socket.on('lobby_update', (state) => { setLobbyData(state); setAgencyName(state.agencyName); });
-    socket.on('room_joined', ({ roomId, role }) => { setRoomId(roomId); if (role === 'solo_master') { setIsGameRunning(true); setMyRole('solo_master'); } });
-    socket.on('role_confirmed', (role) => { setMyRole(role); });
-    socket.on('game_start', (state) => { setIsGameRunning(true); updateGameState(state); });
+    // --- CORRECTION : Réception immédiate du classement ---
+    socket.on('init_data', (data) => {
+        if (data.leaderboards) {
+            setLeaderboards(data.leaderboards);
+        }
+    });
+
+    socket.on('lobby_update', (state) => {
+        setLobbyData(state);
+        setAgencyName(state.agencyName);
+        if (state.leaderboards) {
+            setLeaderboards(state.leaderboards);
+        }
+    });
+
+    socket.on('room_joined', ({ roomId, role }) => {
+        setRoomId(roomId);
+        if (role === 'solo_master') {
+            setIsGameRunning(true);
+            setMyRole('solo_master');
+        }
+    });
+
+    socket.on('role_confirmed', (role) => {
+        setMyRole(role);
+    });
+
+    socket.on('game_start', (state) => {
+        setIsGameRunning(true);
+        updateGameState(state);
+    });
+
     socket.on('game_update', (state) => updateGameState(state));
     socket.on('error', (msg) => alert(msg));
 
-    // NOUVEAU : GESTION DECONNEXION
     socket.on('game_aborted', ({ reason }) => {
         setDisconnectError(reason);
-        setIsGameRunning(false); // Stop le jeu
+        setIsGameRunning(false); 
     });
 
   }, []);
@@ -65,7 +92,9 @@ export const GameProvider = ({ children }) => {
       setBrandBook(state.brandBook || {});
       setGameFinished(state.finished);
       setFinalScore(state.score);
-      setLeaderboards(state.leaderboards);
+      
+      if (state.leaderboards) setLeaderboards(state.leaderboards);
+      
       setServerHeat(state.serverHeat || 0);
       setAssetsReady(state.assetsReady);
       setApiKey(state.apiKey);
@@ -76,10 +105,23 @@ export const GameProvider = ({ children }) => {
       setAgencyName(state.agencyName);
   };
 
-  const createRoom = (mode, agencyName, playerName) => { setGameMode(mode); socket.emit('create_room', { mode, agencyName, playerName }); };
-  const joinRoomRequest = (roomId, playerName) => { setGameMode('agency'); socket.emit('join_room_request', { roomId, playerName }); };
-  const pickRole = (role) => { socket.emit('pick_role', { roomId, role }); };
-  const toggleReady = () => { if (myRole) socket.emit('toggle_ready', { roomId, role: myRole }); };
+  const createRoom = (mode, agencyName, playerName) => {
+      setGameMode(mode);
+      socket.emit('create_room', { mode, agencyName, playerName });
+  };
+
+  const joinRoomRequest = (roomId, playerName) => {
+      setGameMode('agency');
+      socket.emit('join_room_request', { roomId, playerName });
+  };
+
+  const pickRole = (role) => {
+      socket.emit('pick_role', { roomId, role });
+  };
+
+  const toggleReady = () => {
+      if (myRole) socket.emit('toggle_ready', { roomId, role: myRole });
+  };
 
   const validateDevTask = (success) => socket.emit('action_dev_validate', success);
   const unlockDevSecurity = (code) => socket.emit('action_dev_security_unlock', code);
@@ -95,7 +137,7 @@ export const GameProvider = ({ children }) => {
       budget, timeLeft, teamStatus, currentBrief, brandBook, serverHeat,
       assetsReady, securityLock, adminCode, apiKey, leaderboards,
       activeCrisis, crisisCode, agencyName, roomId, gameMode, lobbyData, isGameRunning,
-      createRoom, joinRoomRequest, pickRole, myRole, toggleReady, disconnectError, // Export disconnectError
+      createRoom, joinRoomRequest, pickRole, myRole, toggleReady, disconnectError,
       solveCrisis, unlockDevSecurity, resolveBlockage, 
       validateDevTask, validateCreaTask, processSpam, coolServer, buyBoost,
       gameFinished, finalScore
